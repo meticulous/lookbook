@@ -6,6 +6,7 @@
 #   run Lookbook::McpStaticServer.new("path/to/manifests")
 
 require "json"
+require "logger" # ActiveSupport 6.1 expects Logger to be loaded first
 require "active_support"
 require "active_support/core_ext/object/blank"
 require "active_support/core_ext/enumerable"
