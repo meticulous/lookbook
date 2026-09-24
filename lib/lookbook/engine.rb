@@ -172,6 +172,10 @@ module Lookbook
         @_hooks ||= HookStore.new
       end
 
+      def mcp_tools
+        @_mcp_tools ||= []
+      end
+
       def run_hooks(event_name, *args)
         hooks.for_event(event_name).each do |hook|
           hook.call(Lookbook, *args)

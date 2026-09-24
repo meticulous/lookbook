@@ -48,7 +48,7 @@ RSpec.describe "mcp", type: :request do
     it "falls back to the latest protocol version" do
       result = rpc("initialize", {protocolVersion: "1999-01-01"})["result"]
 
-      expect(result["protocolVersion"]).to eq Lookbook::McpServer::PROTOCOL_VERSIONS.first
+      expect(result["protocolVersion"]).to eq Lookbook::McpProtocol::PROTOCOL_VERSIONS.first
     end
 
     it "accepts notifications with a 202" do
@@ -76,12 +76,12 @@ RSpec.describe "mcp", type: :request do
 
       expect(names).to contain_exactly(
         "docs-list", "docs-show", "docs-show-story", "get-preview-instructions",
-        "previews-show", "previews-find-by-component", "render-scenario"
+        "previews-show", "previews-find-by-component", "previews-changed", "render-scenario", "previews-check"
       )
     end
 
     it "respects toolset config" do
-      mcp_config.toolsets = {dev: false, docs: true}
+      mcp_config.toolsets = {dev: false, docs: true, test: false}
       names = rpc("tools/list")["result"]["tools"].map { |t| t["name"] }
 
       expect(names).to contain_exactly("docs-list", "docs-show", "docs-show-story")
@@ -263,6 +263,13 @@ RSpec.describe "mcp", type: :request do
       expect(text).not_to include("<body")
     end
 
+    it "renders grouped scenarios as part of their group" do
+      text = tool_text("render-scenario", {id: "group/unnamed_group_second"})
+
+      expect(text).to include("first scenario in group")
+      expect(text).to include("second scenario in group")
+    end
+
     it "applies params" do
       text = tool_text("render-scenario", {id: "foo/bar/annotated/another_scenario", params: {text: "custom param text"}})
 
@@ -291,6 +298,111 @@ RSpec.describe "mcp", type: :request do
 
     it "is an error for unknown ids" do
       expect(call_tool("render-scenario", {id: "nope"})["isError"]).to be true
+    end
+  end
+
+  context "previews-check" do
+    it "checks every visible scenario by default" do
+      text = tool_text("previews-check")
+
+      expect(text).to match(/\AChecked \d+ scenarios: \d+ passed, 0 failed/)
+    end
+
+    it "reports failures with the error" do
+      allow_any_instance_of(StandardComponent).to receive(:before_render).and_raise(ArgumentError, "kaboom")
+      text = tool_text("previews-check", {components: ["StandardComponent"]})
+
+      expect(text).to include("0 passed")
+      expect(text).to include("### Standard / Default (id: `standard/default`)")
+      expect(text).to include("ArgumentError: kaboom")
+    end
+
+    it "checks specific scenarios" do
+      text = tool_text("previews-check", {ids: ["standard/default", "nope"]})
+
+      expect(text).to start_with("Checked 1 scenario: 1 passed, 0 failed.")
+      expect(text).to include("Not found: `nope`")
+    end
+
+    it "checks scenarios affected by git changes" do
+      allow_any_instance_of(Lookbook::McpGitChanges).to receive(:files).and_return(["app/components/inline_component.rb"])
+      text = tool_text("previews-check", {changed: true})
+
+      expect(text).to match(/\AChecked \d+ scenarios?: /)
+      expect(text).not_to include("0 passed")
+    end
+  end
+
+  context "previews-changed" do
+    let(:changed_files) { [] }
+
+    before do
+      allow_any_instance_of(Lookbook::McpGitChanges).to receive(:files).and_return(changed_files)
+    end
+
+    context "with a changed preview file" do
+      let(:changed_files) { ["test/components/previews/inline_component_preview.rb"] }
+
+      it "lists the preview and its scenarios" do
+        text = tool_text("previews-changed")
+
+        expect(text).to include("`InlineComponentPreview`) — preview file changed")
+        expect(text).to include("(id: `inline/default`)")
+      end
+    end
+
+    context "with a changed component" do
+      let(:changed_files) { ["app/components/standard_component.html.erb", "app/components/basic_component.rb", "README.md"] }
+
+      it "lists previews that render it and components without previews" do
+        text = tool_text("previews-changed")
+
+        expect(text).to include("`StandardComponentPreview`) — renders `app/components/standard_component.html.erb`")
+        expect(text).to include("## Changed components without previews\n\n- `app/components/basic_component.rb`")
+        expect(text).not_to include("README.md`")
+      end
+    end
+
+    context "without changes" do
+      it "says nothing is affected" do
+        expect(tool_text("previews-changed")).to include("No previews are affected")
+      end
+    end
+
+    it "rejects option-like refs" do
+      allow_any_instance_of(Lookbook::McpGitChanges).to receive(:files).and_call_original
+      result = call_tool("previews-changed", {base: "--output=/tmp/x"})
+
+      expect(result["isError"]).to be true
+      expect(result.dig("content", 0, "text")).to include("Invalid git ref")
+    end
+  end
+
+  context "custom tools" do
+    after { Lookbook.remove_mcp_tool("echo") }
+
+    it "can be added and called" do
+      Lookbook.add_mcp_tool("echo", description: "Echoes text", input_schema: {type: "object", properties: {text: {type: "string"}}}) do |args, context|
+        "#{args["text"]} from #{context[:base_url]}"
+      end
+
+      expect(rpc("tools/list")["result"]["tools"].map { |t| t["name"] }).to include("echo")
+      expect(tool_text("echo", {text: "hello"})).to eq "hello from http://www.example.com"
+    end
+
+    it "returns raised errors as tool errors" do
+      Lookbook.add_mcp_tool("echo", description: "Fails") { |_args, _context| raise "nope" }
+      result = call_tool("echo")
+
+      expect(result["isError"]).to be true
+      expect(result.dig("content", 0, "text")).to eq "RuntimeError: nope"
+    end
+
+    it "can be disabled with its toolset" do
+      Lookbook.add_mcp_tool("echo", description: "Echoes", toolset: :extras) { |_args, _context| "hi" }
+      mcp_config.toolsets = {dev: true, docs: true, test: true, extras: false}
+
+      expect(rpc("tools/list")["result"]["tools"].map { |t| t["name"] }).not_to include("echo")
     end
   end
 

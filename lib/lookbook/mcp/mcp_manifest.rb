@@ -12,6 +12,21 @@ module Lookbook
       @base_url = base_url.to_s.chomp("/")
     end
 
+    # Writes `components.json` and `docs.json` to `dir`.
+    #
+    # @return [Array<Pathname>] The written file paths
+    def self.export(dir, base_url: nil)
+      dir = Pathname(dir)
+      FileUtils.mkdir_p(dir)
+      manifest = new(base_url: base_url)
+
+      {"components.json" => manifest.components, "docs.json" => manifest.docs}.map do |name, data|
+        path = dir.join(name)
+        File.write(path, JSON.pretty_generate(data))
+        path
+      end
+    end
+
     def components
       entries = Engine.previews.reject(&:hidden?).map { |preview| preview_entry(preview) }
       {components: entries.index_by { |entry| entry[:id] }}
@@ -40,11 +55,6 @@ module Lookbook
       nil
     end
 
-    def find_page(ref)
-      ref = ref.to_s.strip.delete_prefix("/")
-      Engine.pages.find { |page| [page.id, page.lookup_path].include?(ref) }
-    end
-
     def preview_entry(preview)
       scenarios = flat_scenarios(preview).reject(&:hidden?)
       {
@@ -71,8 +81,8 @@ module Lookbook
         params: scenario.tags(:param).uniq(&:name).map { |tag| param_entry(tag) },
         snippet: scenario.source,
         snippet_lang: scenario.source_lang[:name].to_s,
-        inspect_url: url(scenario.inspect_path),
-        preview_url: url(scenario.preview_path)
+        inspect_url: url(renderable_for(scenario).inspect_path),
+        preview_url: url(renderable_for(scenario).preview_path)
       }.compact
     end
 
@@ -110,9 +120,20 @@ module Lookbook
     # Previews resolve to their default scenario.
     def find_renderable(ref)
       path = ref.to_s.strip.delete_prefix("/")
-      find_scenario(path) ||
+      target = find_scenario(path) ||
         Engine.previews.find_scenario_by_path(path) ||
         find_preview(path)&.default_scenario
+      renderable_for(target) if target
+    end
+
+    # Scenarios inside a `@!group` can only be rendered (and linked to) as
+    # part of their group, so this returns the group for grouped scenarios.
+    def renderable_for(scenario)
+      return scenario unless scenario.is_a?(ScenarioEntity)
+
+      scenario.preview.scenarios.find do |entity|
+        entity.is_a?(ScenarioGroupEntity) && entity.scenarios.include?(scenario)
+      end || scenario
     end
 
     # Finds visible previews and scenarios that render a component, given its
@@ -137,6 +158,14 @@ module Lookbook
 
     def url(path)
       "#{base_url}#{path}"
+    end
+
+    def relative_path(path)
+      return if path.blank?
+
+      Pathname(path).relative_path_from(Rails.root).to_s
+    rescue ArgumentError
+      path.to_s
     end
 
     private
@@ -238,14 +267,6 @@ module Lookbook
       when Symbol then value.to_s
       else value.inspect
       end
-    end
-
-    def relative_path(path)
-      return if path.blank?
-
-      Pathname(path).relative_path_from(Rails.root).to_s
-    rescue ArgumentError
-      path.to_s
     end
   end
 end

@@ -70,6 +70,7 @@ shared:
     toolsets:
       dev: true
       docs: true
+      test: true
     instructions_path: ~
     base_url: ~
     allowed_origins: []

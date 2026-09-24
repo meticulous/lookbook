@@ -1,26 +1,37 @@
 module Lookbook
   # Rack endpoint implementing the MCP Streamable HTTP transport
-  # (stateless, JSON responses only).
+  # (stateless, JSON responses only) for the live Lookbook instance.
   #
   # Mounted at `<lookbook mount path>/mcp`. Also serves the
   # `/manifests/components.json` and `/manifests/docs.json` endpoints.
   #
   # @api private
   class McpServer
-    PROTOCOL_VERSIONS = %w[2025-06-18 2025-03-26 2024-11-05].freeze
-    SERVER_INSTRUCTIONS = "Lookbook component library for this Rails app. Use docs-list to find existing " \
+    INSTRUCTIONS = "Lookbook component library for this Rails app. Use docs-list to find existing " \
       "components, docs-show before using any component argument or slot, and get-preview-instructions " \
-      "before writing previews. Check your work with render-scenario and share links from previews-show. " \
-      "Never guess component arguments that docs-show does not list."
-
-    PARSE_ERROR = -32700
-    INVALID_REQUEST = -32600
-    METHOD_NOT_FOUND = -32601
-    INVALID_PARAMS = -32602
-    INTERNAL_ERROR = -32603
+      "before writing previews. Check your work with render-scenario or previews-check and share links from " \
+      "previews-show. Never guess component arguments that docs-show does not list."
 
     def self.manifest_endpoint(name)
       ->(env) { new.manifest_response(env, name) }
+    end
+
+    # The shared protocol handler, also used by the stdio server.
+    def self.protocol
+      McpProtocol.new(
+        tools: -> { McpTools.enabled },
+        resources: {
+          "lookbook://manifests/components.json" => ->(context) { McpManifest.new(base_url: context[:base_url]).components },
+          "lookbook://manifests/docs.json" => ->(context) { McpManifest.new(base_url: context[:base_url]).docs }
+        },
+        server_info: {
+          name: "lookbook",
+          title: "#{Lookbook.config.project_name || "Lookbook"} (Lookbook)",
+          version: Lookbook.version
+        },
+        instructions: INSTRUCTIONS,
+        logger: Lookbook.logger
+      )
     end
 
     def call(env)
@@ -57,91 +68,9 @@ module Lookbook
     private
 
     def handle_post(request)
-      payload = JSON.parse(request.body.read)
-    rescue JSON::ParserError
-      json_response(400, error_response(nil, PARSE_ERROR, "Parse error"))
-    else
-      messages = payload.is_a?(Array) ? payload : [payload]
-      return json_response(400, error_response(nil, INVALID_REQUEST, "Invalid request")) if messages.empty?
-
       context = {base_url: base_url(request), request_base_url: request.base_url}
-      responses = messages.filter_map { |message| handle_message(message, context) }
-
-      if responses.empty?
-        [202, {}, []]
-      else
-        json_response(200, payload.is_a?(Array) ? responses : responses.first)
-      end
-    end
-
-    def handle_message(message, context)
-      unless message.is_a?(Hash) && message["jsonrpc"] == "2.0" && message["method"].is_a?(String)
-        return error_response(message.is_a?(Hash) ? message["id"] : nil, INVALID_REQUEST, "Invalid request")
-      end
-
-      id = message["id"]
-      notification = !message.key?("id")
-      params = message["params"].is_a?(Hash) ? message["params"] : {}
-
-      result = dispatch(message["method"], params, context)
-      notification ? nil : {jsonrpc: "2.0", id: id, result: result}
-    rescue RpcError => e
-      notification ? nil : error_response(id, e.code, e.message)
-    rescue => e
-      Lookbook.logger.error("[lookbook-mcp] #{e.class}: #{e.message}")
-      notification ? nil : error_response(id, INTERNAL_ERROR, e.message)
-    end
-
-    def dispatch(method, params, context)
-      case method
-      when "initialize" then initialize_result(params)
-      when "ping" then {}
-      when /\Anotifications\// then {}
-      when "tools/list" then {tools: McpTools.enabled.map(&:definition)}
-      when "tools/call" then call_tool(params, context)
-      when "resources/list" then {resources: resources}
-      when "resources/read" then read_resource(params, context)
-      when "prompts/list" then {prompts: []}
-      else raise RpcError.new(METHOD_NOT_FOUND, "Method not found: #{method}")
-      end
-    end
-
-    def initialize_result(params)
-      requested = params["protocolVersion"]
-      {
-        protocolVersion: PROTOCOL_VERSIONS.include?(requested) ? requested : PROTOCOL_VERSIONS.first,
-        capabilities: {tools: {listChanged: false}, resources: {listChanged: false}, prompts: {listChanged: false}},
-        serverInfo: {name: "lookbook", title: "#{Lookbook.config.project_name || "Lookbook"} (Lookbook)", version: Lookbook.version},
-        instructions: SERVER_INSTRUCTIONS
-      }
-    end
-
-    def call_tool(params, context)
-      tool = McpTools.find(params["name"])
-      raise RpcError.new(INVALID_PARAMS, "Unknown tool: #{params["name"]}") unless tool
-
-      arguments = params["arguments"].is_a?(Hash) ? params["arguments"] : {}
-      text = tool.handler.call(arguments, context)
-      {content: [{type: "text", text: text}], isError: false}
-    rescue McpTools::ToolError => e
-      {content: [{type: "text", text: e.message}], isError: true}
-    end
-
-    def resources
-      [
-        {uri: "lookbook://manifests/components.json", name: "components.json", title: "Components manifest", mimeType: "application/json"},
-        {uri: "lookbook://manifests/docs.json", name: "docs.json", title: "Docs manifest", mimeType: "application/json"}
-      ]
-    end
-
-    def read_resource(params, context)
-      manifest = McpManifest.new(base_url: context[:base_url])
-      data = case params["uri"]
-      when "lookbook://manifests/components.json" then manifest.components
-      when "lookbook://manifests/docs.json" then manifest.docs
-      else raise RpcError.new(INVALID_PARAMS, "Unknown resource: #{params["uri"]}")
-      end
-      {contents: [{uri: params["uri"], mimeType: "application/json", text: JSON.generate(data)}]}
+      status, body = self.class.protocol.handle_json(request.body.read, context)
+      body ? json_response(status, body) : [status, {}, []]
     end
 
     def info_page(request)
@@ -200,10 +129,6 @@ module Lookbook
       Lookbook.config.mcp
     end
 
-    def error_response(id, code, message)
-      {jsonrpc: "2.0", id: id, error: {code: code, message: message}}
-    end
-
     def json_response(status, body)
       [status, {"content-type" => "application/json"}, [JSON.generate(body)]]
     end
@@ -222,15 +147,6 @@ module Lookbook
 
     def method_not_allowed
       [405, {"content-type" => "text/plain", "allow" => "POST"}, ["Method not allowed"]]
-    end
-
-    class RpcError < StandardError
-      attr_reader :code
-
-      def initialize(code, message)
-        @code = code
-        super(message)
-      end
     end
   end
 end

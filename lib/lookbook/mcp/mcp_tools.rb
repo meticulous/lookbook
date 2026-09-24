@@ -1,69 +1,50 @@
 module Lookbook
-  # Built-in tools exposed by the Lookbook MCP server.
+  # Tools exposed by the live Lookbook MCP server.
   #
-  # Tool names and toolsets mirror Storybook's MCP addon
-  # (`docs-list`, `docs-show`, `docs-show-story`) so agent
-  # instructions written for one translate to the other.
+  # Tool names and toolsets mirror Storybook's MCP addon so agent
+  # instructions written for one translate to the other. The docs
+  # toolset lives in McpDocs so it can also be served from exported
+  # manifests.
   #
   # @api private
   class McpTools
-    Tool = Struct.new(:name, :toolset, :description, :input_schema, :handler, keyword_init: true) do
-      def definition
-        {name: name, description: description, inputSchema: input_schema}
-      end
-    end
-
-    class ToolError < StandardError; end
+    ToolError = McpToolError
 
     DEFAULT_INSTRUCTIONS_PATH = File.expand_path("preview_instructions.md", __dir__)
-    SHOW_SCENARIO_LIMIT = 3
     RENDER_MAX_LENGTH = 20_000
+    CHECK_ERROR_LINES = 8
+    COMPONENT_FILE_PATTERN = /\.(rb|erb|haml|slim)\z/
+
+    ARRAY_OF_STRINGS = {type: "array", items: {type: "string"}}.freeze
+    PARAMS_SCHEMA = {
+      type: "object",
+      description: "Optional preview param values (from the scenario's @param tags).",
+      additionalProperties: true
+    }.freeze
 
     class << self
       def all
-        @_all ||= [
-          Tool.new(
-            name: "docs-list",
-            toolset: :docs,
-            description: "Returns an index of all components documented in Lookbook (one entry per preview, " \
-              "listing the components it renders) plus any documentation pages. " \
-              "Call this first to find components to reuse before writing UI.",
-            input_schema: {type: "object", properties: {}},
-            handler: ->(_args, context) { new(context).docs_list }
-          ),
-          Tool.new(
-            name: "docs-show",
-            toolset: :docs,
-            description: "Returns detailed documentation for a component: its description, constructor arguments, " \
-              "slots, preview params, the first #{SHOW_SCENARIO_LIMIT} preview scenarios with source, and an index of the rest. " \
-              "Also returns the content of a documentation page when given a page id.",
-            input_schema: {
-              type: "object",
-              properties: {
-                id: {
-                  type: "string",
-                  description: "A preview id or lookup path from docs-list, a preview class name, a component class name, or a page id."
-                }
-              },
-              required: ["id"]
-            },
-            handler: ->(args, context) { new(context).docs_show(args["id"]) }
-          ),
-          Tool.new(
-            name: "docs-show-story",
-            toolset: :docs,
-            description: "Returns the full source, params and notes for a single preview scenario. " \
-              "Use when docs-show does not include enough detail about a specific scenario.",
-            input_schema: {
-              type: "object",
-              properties: {
-                id: {type: "string", description: "A scenario id or lookup path, as listed by docs-show."}
-              },
-              required: ["id"]
-            },
-            handler: ->(args, context) { new(context).docs_show_story(args["id"]) }
-          ),
-          Tool.new(
+        [*built_in, *Engine.mcp_tools]
+      end
+
+      def enabled
+        toolsets = Lookbook.config.mcp.toolsets.to_h.transform_keys(&:to_sym)
+        all.select { |tool| toolsets.fetch(tool.toolset, true) }
+      end
+
+      def find(name)
+        enabled.find { |tool| tool.name == name.to_s }
+      end
+
+      private
+
+      def built_in
+        @_built_in ||= [
+          *McpDocs.tools(->(context) {
+            manifest = McpManifest.new(base_url: context[:base_url])
+            [manifest.components, manifest.docs]
+          }),
+          McpTool.new(
             name: "get-preview-instructions",
             toolset: :dev,
             description: "Returns instructions for writing Lookbook preview files in this project. " \
@@ -71,7 +52,7 @@ module Lookbook
             input_schema: {type: "object", properties: {}},
             handler: ->(_args, context) { new(context).preview_instructions }
           ),
-          Tool.new(
+          McpTool.new(
             name: "previews-show",
             toolset: :dev,
             description: "Returns links to view preview scenarios in Lookbook: the inspector URL (with source, params and " \
@@ -79,22 +60,14 @@ module Lookbook
             input_schema: {
               type: "object",
               properties: {
-                ids: {
-                  type: "array",
-                  items: {type: "string"},
-                  description: "Scenario or preview ids/lookup paths, as listed by docs-show or previews-find-by-component."
-                },
-                params: {
-                  type: "object",
-                  description: "Optional preview param values (from the scenario's @param tags) to apply to every link.",
-                  additionalProperties: true
-                }
+                ids: ARRAY_OF_STRINGS.merge(description: "Scenario or preview ids/lookup paths, as listed by docs-show or previews-find-by-component."),
+                params: PARAMS_SCHEMA.merge(description: "Optional preview param values to apply to every link.")
               },
               required: ["ids"]
             },
             handler: ->(args, context) { new(context).previews_show(args["ids"], args["params"]) }
           ),
-          Tool.new(
+          McpTool.new(
             name: "previews-find-by-component",
             toolset: :dev,
             description: "Finds the previews and scenarios that render a component. Accepts component class names or " \
@@ -102,17 +75,26 @@ module Lookbook
             input_schema: {
               type: "object",
               properties: {
-                components: {
-                  type: "array",
-                  items: {type: "string"},
-                  description: "Component class names (e.g. `ButtonComponent`) or file paths (e.g. `app/components/button_component.rb`)."
-                }
+                components: ARRAY_OF_STRINGS.merge(description: "Component class names (e.g. `ButtonComponent`) or file paths (e.g. `app/components/button_component.rb`).")
               },
               required: ["components"]
             },
             handler: ->(args, context) { new(context).previews_find_by_component(args["components"]) }
           ),
-          Tool.new(
+          McpTool.new(
+            name: "previews-changed",
+            toolset: :dev,
+            description: "Lists previews and scenarios affected by local changes in git (changed preview files and changed " \
+              "components, templates or partials they render), plus changed components that have no preview.",
+            input_schema: {
+              type: "object",
+              properties: {
+                base: {type: "string", description: "Git ref to compare against. Defaults to HEAD (uncommitted and untracked changes)."}
+              }
+            },
+            handler: ->(args, context) { new(context).previews_changed(args["base"]) }
+          ),
+          McpTool.new(
             name: "render-scenario",
             toolset: :dev,
             description: "Renders a preview scenario and returns its HTML output, or the error raised while rendering it. " \
@@ -121,11 +103,7 @@ module Lookbook
               type: "object",
               properties: {
                 id: {type: "string", description: "A scenario or preview id/lookup path."},
-                params: {
-                  type: "object",
-                  description: "Optional preview param values (from the scenario's @param tags).",
-                  additionalProperties: true
-                },
+                params: PARAMS_SCHEMA,
                 full_page: {
                   type: "boolean",
                   description: "Return the whole document including the preview layout. Defaults to false (body contents only)."
@@ -139,17 +117,23 @@ module Lookbook
               required: ["id"]
             },
             handler: ->(args, context) { new(context).render_scenario(args["id"], args) }
+          ),
+          McpTool.new(
+            name: "previews-check",
+            toolset: :test,
+            description: "Renders preview scenarios and reports any that raise errors or render nothing. Checks every " \
+              "visible scenario unless ids or components are given. Run this after changing components, then fix and re-run.",
+            input_schema: {
+              type: "object",
+              properties: {
+                ids: ARRAY_OF_STRINGS.merge(description: "Scenario or preview ids/lookup paths to check."),
+                components: ARRAY_OF_STRINGS.merge(description: "Check every scenario that renders these components (class names or file paths)."),
+                changed: {type: "boolean", description: "Check scenarios affected by uncommitted git changes (see previews-changed)."}
+              }
+            },
+            handler: ->(args, context) { new(context).previews_check(args) }
           )
         ].freeze
-      end
-
-      def enabled
-        toolsets = Lookbook.config.mcp.toolsets.to_h.transform_keys(&:to_sym)
-        all.select { |tool| toolsets.fetch(tool.toolset, true) }
-      end
-
-      def find(name)
-        enabled.find { |tool| tool.name == name.to_s }
       end
     end
 
@@ -160,59 +144,6 @@ module Lookbook
       @manifest = McpManifest.new(base_url: context[:base_url])
     end
 
-    def docs_list
-      components = manifest.components[:components].values
-      docs = manifest.docs[:docs].values.reject { |doc| doc[:hidden] }
-
-      out = ["# Components", ""]
-      if components.empty?
-        out << "_No previews found._"
-      else
-        components.each do |entry|
-          rendered = entry[:components].map { |c| c[:name] }
-          line = "- **#{entry[:name]}** (id: `#{entry[:id]}`)"
-          line += " renders #{rendered.map { |n| "`#{n}`" }.join(", ")}" if rendered.any?
-          line += " — #{first_line(entry[:description])}" if entry[:description]
-          out << line
-        end
-      end
-
-      if docs.any?
-        out += ["", "# Docs", ""]
-        docs.each { |doc| out << "- **#{doc[:title]}** (id: `#{doc[:id]}`)" }
-      end
-
-      out.join("\n")
-    end
-
-    def docs_show(ref)
-      raise ToolError, "Missing required argument: id" if ref.blank?
-
-      if (preview = manifest.find_preview(ref))
-        component_markdown(manifest.preview_entry(preview))
-      elsif (page = manifest.find_page(ref))
-        entry = manifest.page_entry(page)
-        ["# #{entry[:title]}", "", "Source: `#{entry[:path]}`", "URL: #{entry[:url]}", "", entry[:content]].join("\n")
-      else
-        raise ToolError, "No component or page found for '#{ref}'. Use docs-list to see available ids."
-      end
-    end
-
-    def docs_show_story(ref)
-      raise ToolError, "Missing required argument: id" if ref.blank?
-
-      scenario = manifest.find_scenario(ref)
-      raise ToolError, "No scenario found for '#{ref}'. Use docs-show to see scenario ids." unless scenario
-
-      entry = manifest.scenario_entry(scenario)
-      preview_entry = manifest.preview_entry(scenario.preview)
-
-      out = ["# #{preview_entry[:name]} / #{entry[:name]}", ""]
-      out << "Preview class: `#{preview_entry[:preview_class]}` (`#{preview_entry[:path]}`)"
-      out += scenario_markdown(entry, heading_level: 2)
-      out.join("\n")
-    end
-
     def preview_instructions
       path = Lookbook.config.mcp.instructions_path.presence
       path = Rails.root.join(path) if path && !Pathname(path).absolute?
@@ -220,7 +151,7 @@ module Lookbook
     end
 
     def previews_show(refs, params = nil)
-      refs = Array(refs).map(&:to_s).reject(&:blank?)
+      refs = string_list(refs)
       raise ToolError, "Missing required argument: ids" if refs.empty?
 
       query = params.to_h.to_query.presence
@@ -231,7 +162,7 @@ module Lookbook
         target = manifest.find_renderable(ref)
         next missing << ref unless target
 
-        out += ["", "## #{target.preview.label} / #{target.label}", ""]
+        out += ["", "## #{target_label(target)}", ""]
         out << "- Inspect: #{with_query(manifest.url(target.inspect_path), query)}"
         out << "- Preview: #{with_query(manifest.url(target.preview_path), query)}"
       end
@@ -243,7 +174,7 @@ module Lookbook
     end
 
     def previews_find_by_component(refs)
-      refs = Array(refs).map(&:to_s).reject(&:blank?)
+      refs = string_list(refs)
       raise ToolError, "Missing required argument: components" if refs.empty?
 
       out = []
@@ -257,14 +188,36 @@ module Lookbook
         end
 
         results.each do |preview, scenarios|
-          out << "- **#{preview.label}** (id: `#{preview.id}`, `#{preview.preview_class_name}`)"
-          scenarios.each do |scenario|
-            out << "  - #{scenario.label} (id: `#{scenario.lookup_path}`) #{manifest.url(scenario.preview_path)}"
-          end
+          out << preview_line(preview)
+          scenarios.each { |scenario| out << scenario_line(scenario) }
         end
       end
 
       out.join("\n").strip
+    end
+
+    def previews_changed(base = nil)
+      files = McpGitChanges.new.files(base)
+      affected, uncovered = changed_previews(files)
+
+      out = ["Changed files: #{files.size}#{" (compared to #{base})" if base.present?}"]
+
+      if affected.empty?
+        out += ["", "No previews are affected by these changes."]
+      else
+        out += ["", "## Affected previews", ""]
+        affected.each do |preview, (scenarios, reasons)|
+          out << "#{preview_line(preview)} — #{reasons.to_a.join("; ")}"
+          scenarios.each { |scenario| out << scenario_line(scenario) }
+        end
+      end
+
+      if uncovered.any?
+        out += ["", "## Changed components without previews", ""]
+        uncovered.each { |path| out << "- `#{path}`" }
+      end
+
+      out.join("\n")
     end
 
     def render_scenario(ref, options = {})
@@ -273,9 +226,8 @@ module Lookbook
       target = manifest.find_renderable(ref)
       raise ToolError, "No scenario found for '#{ref}'. Use docs-show to see scenario ids." unless target
 
-      renderer = McpRenderer.new(base_url: context[:request_base_url] || context[:base_url])
       result = renderer.call(target, params: options["params"])
-      heading = "#{target.preview.label} / #{target.label} (`#{target.lookup_path}`)"
+      heading = "#{target_label(target)} (`#{target.lookup_path}`)"
 
       unless result.success?
         raise ToolError, "Rendering #{heading} failed (HTTP #{result.status}):\n\n#{result.error.to_s.strip}"
@@ -294,82 +246,135 @@ module Lookbook
       out.join("\n")
     end
 
-    private
+    def previews_check(options = {})
+      scenarios, missing = check_targets(options)
+      raise ToolError, "Nothing to check: #{missing.map { |m| "`#{m}`" }.join(", ")} not found." if scenarios.empty? && missing.any?
+      return "No scenarios to check." if scenarios.empty?
 
-    def with_query(url, query)
-      query ? "#{url}?#{query}" : url
-    end
+      failures = []
+      warnings = []
 
-    def component_markdown(entry)
-      out = ["# #{entry[:name]}", ""]
-      out << "Preview class: `#{entry[:preview_class]}` (`#{entry[:path]}`)"
-      out << "Inspect: #{entry[:inspect_url]}"
-      out += ["", entry[:description]] if entry[:description]
-
-      entry[:components].each do |component|
-        kind = (component[:type] == "component") ? "Component" : "Template"
-        out += ["", "## #{kind}: `#{component[:name]}`", ""]
-        out << "Source: `#{component[:path]}`"
-        out << "Template: `#{component[:template_path]}`" if component[:template_path]
-        out += ["", component[:description]] if component[:description]
-
-        if component[:arguments].present?
-          out += ["", "### Arguments", ""]
-          component[:arguments].each do |arg|
-            line = "- `#{arg[:name]}` (#{arg[:kind]}#{", required" if arg[:required]})"
-            line += " — #{arg[:description]}" if arg[:description]
-            out << line
-          end
-        end
-
-        if component[:slots].present?
-          out += ["", "### Slots", ""]
-          component[:slots].each do |slot|
-            out << "- `#{slot[:name]}`#{" (collection)" if slot[:collection]}"
-          end
+      scenarios.each do |scenario|
+        result = renderer.call(scenario)
+        if !result.success?
+          failures << [scenario, "HTTP #{result.status}: #{result.error.to_s.strip.lines.first(CHECK_ERROR_LINES).join.strip}"]
+        elsif McpRenderer.body_content(result.html).blank?
+          warnings << [scenario, "rendered no output"]
         end
       end
 
-      scenarios = entry[:scenarios]
-      shown = scenarios.first(SHOW_SCENARIO_LIMIT)
-      rest = scenarios.drop(SHOW_SCENARIO_LIMIT)
+      passed = scenarios.size - failures.size
+      out = ["Checked #{scenarios.size} #{"scenario".pluralize(scenarios.size)}: #{passed} passed, #{failures.size} failed" \
+        "#{", #{warnings.size} with warnings" if warnings.any?}."]
 
-      if shown.any?
-        out += ["", "## Scenarios"]
-        shown.each { |scenario| out += scenario_markdown(scenario, heading_level: 3) }
+      if failures.any?
+        out += ["", "## Failures"]
+        failures.each do |scenario, message|
+          out += ["", "### #{target_label(scenario)} (id: `#{scenario.lookup_path}`)", "", "```", message, "```"]
+        end
       end
 
-      if rest.any?
-        out += ["", "## Other scenarios", "", "Use docs-show-story with one of these ids for details:", ""]
-        rest.each { |scenario| out << "- #{scenario[:name]} (id: `#{scenario[:lookup_path]}`)" }
+      if warnings.any?
+        out += ["", "## Warnings", ""]
+        warnings.each { |scenario, message| out << "- #{target_label(scenario)} (id: `#{scenario.lookup_path}`): #{message}" }
       end
 
+      out += ["", "Not found: #{missing.map { |m| "`#{m}`" }.join(", ")}"] if missing.any?
       out.join("\n")
     end
 
-    def scenario_markdown(entry, heading_level:)
-      hashes = "#" * heading_level
-      out = ["", "#{hashes} #{entry[:name]}", ""]
-      out << "id: `#{entry[:lookup_path]}`"
-      out << "Group: #{entry[:group]}" if entry[:group]
-      out << "Preview: #{entry[:preview_url]}"
-      out += ["", entry[:description]] if entry[:description]
+    private
 
-      if entry[:params].present?
-        out += ["", "Params:", ""]
-        entry[:params].each do |param|
-          line = "- `#{param[:name]}` (#{param[:type]}, input: #{param[:input]})"
-          line += " default: `#{param[:default].is_a?(String) ? param[:default].inspect : param[:default]}`" unless param[:default].nil?
-          line += " — #{param[:description]}" if param[:description]
-          out << line
-        end
-      end
-
-      out += ["", "```#{entry[:snippet_lang]}", entry[:snippet], "```"]
+    def renderer
+      @renderer ||= McpRenderer.new(base_url: context[:request_base_url] || context[:base_url])
     end
 
-    def first_line(text)
-      text.to_s.lines.first.to_s.strip
+    # Returns `[{preview => [scenarios, reasons]}, uncovered_component_paths]`.
+    def changed_previews(files)
+      affected = Hash.new { |hash, preview| hash[preview] = [Set.new, Set.new] }
+      previews = Engine.previews.reject(&:hidden?)
+      preview_files = previews.index_by { |preview| manifest.relative_path(preview.file_path) }
+      uncovered = []
+
+      files.each do |file|
+        if (preview = preview_files[file])
+          affected[preview][0].merge(manifest.flat_scenarios(preview).reject(&:hidden?))
+          affected[preview][1] << "preview file changed"
+          next
+        end
+
+        matches = manifest.find_by_component(file)
+        matches.each do |match_preview, scenarios|
+          affected[match_preview][0].merge(scenarios)
+          affected[match_preview][1] << "renders `#{file}`"
+        end
+
+        uncovered << file if matches.empty? && component_file?(file)
+      end
+
+      [affected.transform_values { |(scenarios, reasons)| [scenarios.to_a, reasons] }, uncovered]
+    end
+
+    def component_file?(file)
+      return false unless file.match?(COMPONENT_FILE_PATTERN)
+
+      full_path = Rails.root.join(file).to_s
+      Engine.component_paths.any? { |dir| full_path.start_with?("#{dir}/") } &&
+        Engine.preview_paths.none? { |dir| full_path.start_with?("#{dir}/") }
+    end
+
+    def check_targets(options)
+      ids = string_list(options["ids"])
+      components = string_list(options["components"])
+      missing = []
+
+      if ids.empty? && components.empty? && !options["changed"]
+        scenarios = Engine.previews.reject(&:hidden?).flat_map do |preview|
+          manifest.flat_scenarios(preview).reject(&:hidden?)
+        end
+        return [renderables(scenarios), missing]
+      end
+
+      scenarios = ids.filter_map do |ref|
+        manifest.find_renderable(ref).tap { |target| missing << ref unless target }
+      end
+
+      components.each do |ref|
+        matches = manifest.find_by_component(ref)
+        missing << ref if matches.empty?
+        scenarios += matches.flat_map(&:last)
+      end
+
+      if options["changed"]
+        scenarios += changed_previews(McpGitChanges.new.files).first.values.flat_map(&:first)
+      end
+
+      [renderables(scenarios), missing]
+    end
+
+    # Grouped scenarios are rendered once, as their group.
+    def renderables(scenarios)
+      scenarios.map { |scenario| manifest.renderable_for(scenario) }.uniq(&:lookup_path)
+    end
+
+    def preview_line(preview)
+      "- **#{preview.label}** (id: `#{preview.id}`, `#{preview.preview_class_name}`)"
+    end
+
+    def scenario_line(scenario)
+      "  - #{scenario.label} (id: `#{scenario.lookup_path}`) #{manifest.url(manifest.renderable_for(scenario).preview_path)}"
+    end
+
+    def target_label(target)
+      "#{target.preview.label} / #{target.label}"
+    end
+
+    def string_list(value)
+      Array(value).map(&:to_s).reject(&:blank?)
+    end
+
+    def with_query(url, query)
+      query ? "#{url}?#{query}" : url
     end
   end
 end

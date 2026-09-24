@@ -9,7 +9,10 @@ loader.collapse("#{__dir__}/lookbook/*/*")
 loader.collapse("#{__dir__}/lookbook/*/*/*")
 loader.ignore("#{__dir__}/lookbook/support/evented_file_update_checker.rb")
 loader.ignore("#{__dir__}/lookbook/cable")
+loader.ignore("#{__dir__}/lookbook/mcp/core.rb", "#{__dir__}/lookbook/mcp/core")
 loader.setup
+
+require "lookbook/mcp/core"
 
 # The Lookbook application entry point.
 #
@@ -142,6 +145,49 @@ module Lookbook
         named_args: args.to_a,
         after_parse: block
       })
+    end
+
+    # @!endgroup
+
+    # @!group MCP Tools
+
+    # Add a custom tool to the Lookbook MCP server.
+    #
+    # The block receives the tool arguments (a Hash with string keys) and
+    # a context Hash (including `:base_url`), and must return a String.
+    # Raise `Lookbook::McpToolError` to return an error message to the agent.
+    #
+    # @example :ruby
+    #   Lookbook.add_mcp_tool("design-tokens",
+    #     description: "Returns the design tokens available to components",
+    #     input_schema: {type: "object", properties: {group: {type: "string"}}}
+    #   ) do |args, context|
+    #     DesignTokens.to_markdown(group: args["group"])
+    #   end
+    #
+    # @param name [String] Tool name
+    # @param description [String] Description shown to the agent
+    # @param input_schema [Hash] JSON Schema for the tool arguments
+    # @param toolset [Symbol] Toolset the tool belongs to, for `mcp.toolsets` config
+    # @yield [args, context] Tool arguments and request context
+    def add_mcp_tool(name, description:, input_schema: nil, toolset: :custom, &block)
+      raise ArgumentError, "add_mcp_tool requires a block" unless block
+
+      Engine.mcp_tools.reject! { |tool| tool.name == name.to_s }
+      Engine.mcp_tools << McpTool.new(
+        name: name.to_s,
+        toolset: toolset.to_sym,
+        description: description,
+        input_schema: input_schema,
+        handler: block
+      )
+    end
+
+    # Remove a custom tool from the Lookbook MCP server.
+    #
+    # @param name [String] Tool name
+    def remove_mcp_tool(name)
+      Engine.mcp_tools.reject! { |tool| tool.name == name.to_s }
     end
 
     # @!endgroup
