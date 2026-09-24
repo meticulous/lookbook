@@ -65,6 +65,16 @@ shared:
 
   debug_menu: false
 
+  mcp:
+    enabled: false
+    toolsets:
+      dev: true
+      docs: true
+    instructions_path: ~
+    base_url: ~
+    allowed_origins: []
+    token: ~
+
   links:
     docs: https://v2.lookbook.build
     demo: https://v2-demo.lookbook.build
@@ -73,6 +83,8 @@ shared:
 development:
   debug_menu: true
   live_updates: true
+  mcp:
+    enabled: true
 
 test:
   debug_menu: true
