@@ -17,6 +17,7 @@ module Lookbook
 
     DEFAULT_INSTRUCTIONS_PATH = File.expand_path("preview_instructions.md", __dir__)
     SHOW_SCENARIO_LIMIT = 3
+    RENDER_MAX_LENGTH = 20_000
 
     class << self
       def all
@@ -69,6 +70,75 @@ module Lookbook
               "Call this before creating or updating previews.",
             input_schema: {type: "object", properties: {}},
             handler: ->(_args, context) { new(context).preview_instructions }
+          ),
+          Tool.new(
+            name: "previews-show",
+            toolset: :dev,
+            description: "Returns links to view preview scenarios in Lookbook: the inspector URL (with source, params and " \
+              "notes panels) and the standalone preview URL. Share these with the user so they can check your work.",
+            input_schema: {
+              type: "object",
+              properties: {
+                ids: {
+                  type: "array",
+                  items: {type: "string"},
+                  description: "Scenario or preview ids/lookup paths, as listed by docs-show or previews-find-by-component."
+                },
+                params: {
+                  type: "object",
+                  description: "Optional preview param values (from the scenario's @param tags) to apply to every link.",
+                  additionalProperties: true
+                }
+              },
+              required: ["ids"]
+            },
+            handler: ->(args, context) { new(context).previews_show(args["ids"], args["params"]) }
+          ),
+          Tool.new(
+            name: "previews-find-by-component",
+            toolset: :dev,
+            description: "Finds the previews and scenarios that render a component. Accepts component class names or " \
+              "paths to component Ruby files, templates or partials (relative to the app root).",
+            input_schema: {
+              type: "object",
+              properties: {
+                components: {
+                  type: "array",
+                  items: {type: "string"},
+                  description: "Component class names (e.g. `ButtonComponent`) or file paths (e.g. `app/components/button_component.rb`)."
+                }
+              },
+              required: ["components"]
+            },
+            handler: ->(args, context) { new(context).previews_find_by_component(args["components"]) }
+          ),
+          Tool.new(
+            name: "render-scenario",
+            toolset: :dev,
+            description: "Renders a preview scenario and returns its HTML output, or the error raised while rendering it. " \
+              "Use this to check that a component renders what you expect with given params, without a browser.",
+            input_schema: {
+              type: "object",
+              properties: {
+                id: {type: "string", description: "A scenario or preview id/lookup path."},
+                params: {
+                  type: "object",
+                  description: "Optional preview param values (from the scenario's @param tags).",
+                  additionalProperties: true
+                },
+                full_page: {
+                  type: "boolean",
+                  description: "Return the whole document including the preview layout. Defaults to false (body contents only)."
+                },
+                beautify: {type: "boolean", description: "Reformat the HTML for readability. Defaults to false."},
+                max_length: {
+                  type: "integer",
+                  description: "Maximum number of characters of HTML to return. Defaults to #{RENDER_MAX_LENGTH}."
+                }
+              },
+              required: ["id"]
+            },
+            handler: ->(args, context) { new(context).render_scenario(args["id"], args) }
           )
         ].freeze
       end
@@ -83,9 +153,10 @@ module Lookbook
       end
     end
 
-    attr_reader :manifest
+    attr_reader :manifest, :context
 
     def initialize(context = {})
+      @context = context
       @manifest = McpManifest.new(base_url: context[:base_url])
     end
 
@@ -148,7 +219,86 @@ module Lookbook
       File.read(path || DEFAULT_INSTRUCTIONS_PATH)
     end
 
+    def previews_show(refs, params = nil)
+      refs = Array(refs).map(&:to_s).reject(&:blank?)
+      raise ToolError, "Missing required argument: ids" if refs.empty?
+
+      query = params.to_h.to_query.presence
+      out = []
+      missing = []
+
+      refs.each do |ref|
+        target = manifest.find_renderable(ref)
+        next missing << ref unless target
+
+        out += ["", "## #{target.preview.label} / #{target.label}", ""]
+        out << "- Inspect: #{with_query(manifest.url(target.inspect_path), query)}"
+        out << "- Preview: #{with_query(manifest.url(target.preview_path), query)}"
+      end
+
+      out += ["", "Not found: #{missing.map { |m| "`#{m}`" }.join(", ")}. Use docs-list or docs-show to find ids."] if missing.any?
+      raise ToolError, out.join("\n").strip if missing.size == refs.size
+
+      out.join("\n").strip
+    end
+
+    def previews_find_by_component(refs)
+      refs = Array(refs).map(&:to_s).reject(&:blank?)
+      raise ToolError, "Missing required argument: components" if refs.empty?
+
+      out = []
+      refs.each do |ref|
+        out += ["", "## `#{ref}`", ""]
+        results = manifest.find_by_component(ref)
+
+        if results.empty?
+          out << "No previews render this component. Call get-preview-instructions to write one."
+          next
+        end
+
+        results.each do |preview, scenarios|
+          out << "- **#{preview.label}** (id: `#{preview.id}`, `#{preview.preview_class_name}`)"
+          scenarios.each do |scenario|
+            out << "  - #{scenario.label} (id: `#{scenario.lookup_path}`) #{manifest.url(scenario.preview_path)}"
+          end
+        end
+      end
+
+      out.join("\n").strip
+    end
+
+    def render_scenario(ref, options = {})
+      raise ToolError, "Missing required argument: id" if ref.blank?
+
+      target = manifest.find_renderable(ref)
+      raise ToolError, "No scenario found for '#{ref}'. Use docs-show to see scenario ids." unless target
+
+      renderer = McpRenderer.new(base_url: context[:request_base_url] || context[:base_url])
+      result = renderer.call(target, params: options["params"])
+      heading = "#{target.preview.label} / #{target.label} (`#{target.lookup_path}`)"
+
+      unless result.success?
+        raise ToolError, "Rendering #{heading} failed (HTTP #{result.status}):\n\n#{result.error.to_s.strip}"
+      end
+
+      html = options["full_page"] ? result.html.to_s.strip : McpRenderer.body_content(result.html)
+      html = CodeBeautifier.call(html) if options["beautify"]
+
+      max_length = options["max_length"].to_i
+      max_length = RENDER_MAX_LENGTH unless max_length.positive?
+      truncated = html.length > max_length
+
+      out = ["Rendered #{heading}", "Preview: #{with_query(manifest.url(target.preview_path), options["params"].to_h.to_query.presence)}"]
+      out << "Output truncated to #{max_length} of #{html.length} characters." if truncated
+      out += ["", "```html", html[0, max_length], "```"]
+      out.join("\n")
+    end
+
     private
+
+    def with_query(url, query)
+      query ? "#{url}?#{query}" : url
+    end
 
     def component_markdown(entry)
       out = ["# #{entry[:name]}", ""]

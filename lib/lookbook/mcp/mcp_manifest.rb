@@ -106,12 +106,53 @@ module Lookbook
       }
     end
 
-    private
+    # Resolves a scenario, scenario group or preview reference to something renderable.
+    # Previews resolve to their default scenario.
+    def find_renderable(ref)
+      path = ref.to_s.strip.delete_prefix("/")
+      find_scenario(path) ||
+        Engine.previews.find_scenario_by_path(path) ||
+        find_preview(path)&.default_scenario
+    end
+
+    # Finds visible previews and scenarios that render a component, given its
+    # class name or the path to its Ruby file or template.
+    def find_by_component(ref)
+      ref = normalize_path(ref)
+      matches = ->(target) { render_target_refs(target).include?(ref) }
+
+      Engine.previews.reject(&:hidden?).filter_map do |preview|
+        scenarios = flat_scenarios(preview).reject(&:hidden?).select do |scenario|
+          scenario.render_targets.any?(&matches)
+        end
+        [preview, scenarios] if scenarios.any? || preview.render_targets.any?(&matches)
+      end
+    end
 
     def flat_scenarios(preview)
       preview.scenarios.flat_map do |scenario|
         scenario.is_a?(ScenarioGroupEntity) ? scenario.scenarios.to_a : [scenario]
       end
+    end
+
+    def url(path)
+      "#{base_url}#{path}"
+    end
+
+    private
+
+    def render_target_refs(target)
+      refs = [relative_path(target.file_path), target.name]
+      if target.component?
+        refs << target.component_class.name
+        refs << relative_path(target.template_file_path) if target.template_file_path
+      end
+      refs.compact
+    end
+
+    def normalize_path(ref)
+      ref = ref.to_s.strip.delete_prefix("./")
+      Pathname(ref).absolute? ? relative_path(ref) : ref
     end
 
     def param_entry(tag)
@@ -205,10 +246,6 @@ module Lookbook
       Pathname(path).relative_path_from(Rails.root).to_s
     rescue ArgumentError
       path.to_s
-    end
-
-    def url(path)
-      "#{base_url}#{path}"
     end
   end
 end

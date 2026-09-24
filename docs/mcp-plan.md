@@ -36,6 +36,8 @@ When working on UI components, use the `lookbook` MCP tools before writing any v
 - Query `docs-list` to find existing components.
 - Query `docs-show` for a component before using it. Only use constructor arguments and slots it documents.
 - Call `get-preview-instructions` before creating or updating previews.
+- After changing a component, use `previews-find-by-component` and `render-scenario` to check affected previews.
+- Share `previews-show` links so the user can review the result.
 ```
 
 ## Tools
@@ -46,9 +48,9 @@ When working on UI components, use the `lookbook` MCP tools before writing any v
 | docs | `docs-show` | `docs-show` | Done |
 | docs | `docs-show-story` | `docs-show-story` | Done |
 | dev | `get-preview-instructions` | `get-storybook-story-instructions` | Done |
-| dev | `previews-show` | `stories-preview` | Phase 2 |
-| dev | `previews-find-by-component` | `stories-find-by-component` | Phase 2 |
-| dev | `render-scenario` | none | Phase 2 |
+| dev | `previews-show` | `stories-preview` | Done (links; MCP Apps inline view in phase 4) |
+| dev | `previews-find-by-component` | `stories-find-by-component` | Done |
+| dev | `render-scenario` | none | Done |
 | dev | `previews-changed` | `stories-changed` | Phase 3 |
 | test | `previews-check` | `test-run` | Phase 3 |
 
@@ -67,7 +69,7 @@ Equivalent to Storybook's `/manifests/components.json` and `/manifests/docs.json
 ## Roadmap
 
 1. **Done:** manifests, docs toolset, preview instructions, HTTP endpoint and info page, config, origin and token checks.
-2. `previews-show`, `previews-find-by-component`, and `render-scenario` (rendered HTML with params).
+2. **Done:** `previews-show`, `previews-find-by-component`, and `render-scenario` (rendered HTML with params).
 3. `previews-check` (render every scenario and report errors), `previews-changed` (git diff mapped to previews),
    `rake lookbook:manifests` static export plus a read-only docs server for sharing,
    `Lookbook.add_mcp_tool` for host-app tools, stdio entry point.
@@ -79,5 +81,10 @@ Equivalent to Storybook's `/manifests/components.json` and `/manifests/docs.json
   `text/html` returns 405 (no SSE stream), and no `Mcp-Session-Id` is issued.
 - Manifests are built per request from the in-memory preview and page collections,
   so they always reflect the reloaded state. Cache if this becomes slow on large libraries.
+- `render-scenario` makes an internal request to the standalone preview route, so layouts,
+  param casting and display options match the UI. Render errors come back as the exception
+  class, message and cleaned backtrace instead of Lookbook's HTML error page.
+- `previews-find-by-component` matches component class names, Ruby file paths and template
+  or partial paths (relative to the app root).
 - Component descriptions come from the comment block above the class definition and
   argument descriptions from `@param` lines above `def initialize`.

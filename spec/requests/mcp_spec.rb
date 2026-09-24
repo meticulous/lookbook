@@ -74,14 +74,17 @@ RSpec.describe "mcp", type: :request do
     it "lists tools" do
       names = rpc("tools/list")["result"]["tools"].map { |t| t["name"] }
 
-      expect(names).to contain_exactly("docs-list", "docs-show", "docs-show-story", "get-preview-instructions")
+      expect(names).to contain_exactly(
+        "docs-list", "docs-show", "docs-show-story", "get-preview-instructions",
+        "previews-show", "previews-find-by-component", "render-scenario"
+      )
     end
 
     it "respects toolset config" do
-      mcp_config.toolsets = {dev: true, docs: false}
+      mcp_config.toolsets = {dev: false, docs: true}
       names = rpc("tools/list")["result"]["tools"].map { |t| t["name"] }
 
-      expect(names).to eq ["get-preview-instructions"]
+      expect(names).to contain_exactly("docs-list", "docs-show", "docs-show-story")
     end
 
     it "returns an info page for browsers" do
@@ -201,6 +204,93 @@ RSpec.describe "mcp", type: :request do
       expect(tool_text("get-preview-instructions")).to eq "custom instructions"
     ensure
       file&.unlink
+    end
+  end
+
+  context "previews-show" do
+    it "returns inspect and preview links with params" do
+      text = tool_text("previews-show", {ids: ["foo/bar/annotated/another_scenario"], params: {text: "hi there"}})
+
+      expect(text).to include("Inspect: http://www.example.com/lookbook/inspect/foo/bar/annotated/another_scenario?text=hi+there")
+      expect(text).to include("Preview: http://www.example.com/lookbook/preview/foo/bar/annotated/another_scenario?text=hi+there")
+    end
+
+    it "resolves previews to their default scenario" do
+      text = tool_text("previews-show", {ids: ["standard"]})
+
+      expect(text).to include("/lookbook/preview/standard/")
+    end
+
+    it "lists ids that were not found" do
+      text = tool_text("previews-show", {ids: ["standard", "nope"]})
+
+      expect(text).to include("Not found: `nope`")
+    end
+
+    it "is an error when nothing is found" do
+      expect(call_tool("previews-show", {ids: ["nope"]})["isError"]).to be true
+    end
+  end
+
+  context "previews-find-by-component" do
+    it "finds previews by component class name" do
+      text = tool_text("previews-find-by-component", {components: ["StandardComponent"]})
+
+      expect(text).to include("(id: `standard`, `StandardComponentPreview`)")
+      expect(text).to include("(id: `foo/bar/annotated/third_scenario`)")
+      expect(text).not_to include("foo/bar/annotated/default")
+    end
+
+    it "finds previews by component file path" do
+      text = tool_text("previews-find-by-component", {components: ["app/components/standard_component.html.erb"]})
+
+      expect(text).to include("`StandardComponentPreview`")
+    end
+
+    it "reports components without previews" do
+      text = tool_text("previews-find-by-component", {components: ["BasicComponent"]})
+
+      expect(text).to include("No previews render this component")
+    end
+  end
+
+  context "render-scenario" do
+    it "renders the scenario body" do
+      text = tool_text("render-scenario", {id: "foo/bar/annotated/third_scenario"})
+
+      expect(text).to include("```html")
+      expect(text).to include("third component content")
+      expect(text).not_to include("<body")
+    end
+
+    it "applies params" do
+      text = tool_text("render-scenario", {id: "foo/bar/annotated/another_scenario", params: {text: "custom param text"}})
+
+      expect(text).to include("custom param text")
+    end
+
+    it "optionally returns the full page" do
+      text = tool_text("render-scenario", {id: "foo/bar/annotated/third_scenario", full_page: true})
+
+      expect(text).to include("<body")
+    end
+
+    it "truncates long output" do
+      text = tool_text("render-scenario", {id: "foo/bar/annotated/third_scenario", max_length: 10})
+
+      expect(text).to include("Output truncated to 10 of")
+    end
+
+    it "returns the error raised while rendering" do
+      allow_any_instance_of(StandardComponent).to receive(:before_render).and_raise(ArgumentError, "kaboom")
+      result = call_tool("render-scenario", {id: "foo/bar/annotated/third_scenario"})
+
+      expect(result["isError"]).to be true
+      expect(result.dig("content", 0, "text")).to include("ArgumentError: kaboom")
+    end
+
+    it "is an error for unknown ids" do
+      expect(call_tool("render-scenario", {id: "nope"})["isError"]).to be true
     end
   end
 

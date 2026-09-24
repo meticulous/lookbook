@@ -10,7 +10,8 @@ module Lookbook
     PROTOCOL_VERSIONS = %w[2025-06-18 2025-03-26 2024-11-05].freeze
     SERVER_INSTRUCTIONS = "Lookbook component library for this Rails app. Use docs-list to find existing " \
       "components, docs-show before using any component argument or slot, and get-preview-instructions " \
-      "before writing previews. Never guess component arguments that docs-show does not list."
+      "before writing previews. Check your work with render-scenario and share links from previews-show. " \
+      "Never guess component arguments that docs-show does not list."
 
     PARSE_ERROR = -32700
     INVALID_REQUEST = -32600
@@ -63,7 +64,7 @@ module Lookbook
       messages = payload.is_a?(Array) ? payload : [payload]
       return json_response(400, error_response(nil, INVALID_REQUEST, "Invalid request")) if messages.empty?
 
-      context = {base_url: base_url(request)}
+      context = {base_url: base_url(request), request_base_url: request.base_url}
       responses = messages.filter_map { |message| handle_message(message, context) }
 
       if responses.empty?
