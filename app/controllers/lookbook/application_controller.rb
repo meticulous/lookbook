@@ -76,6 +76,14 @@ module Lookbook
     def handle_error(err)
       raise err if Lookbook.config.preview_disable_error_handling
 
+      if request.env[McpRenderer::ENV_KEY]
+        error = err.try(:original) || err
+        error = error.cause if error.is_a?(ActionView::Template::Error) && error.cause
+        backtrace = Array(error.backtrace)
+        trace = (Rails.backtrace_cleaner.clean(backtrace).presence || backtrace).first(10).join("\n")
+        return render(plain: "#{error.class}: #{error.message}\n\n#{trace}", status: get_status_code(err) || :internal_server_error)
+      end
+
       @error = err.is_a?(Lookbook::Error) ? err : Lookbook::Error.new(original: err)
       @status_code = get_status_code(err)
 

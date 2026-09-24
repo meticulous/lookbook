@@ -18,5 +18,9 @@ Lookbook::Engine.routes.draw do
     get "/embed/*path", to: "embeds#show", as: :lookbook_embed
   end
 
+  mount Lookbook::McpServer.new => "/mcp", :as => :mcp
+  get "/manifests/components.json", to: Lookbook::McpServer.manifest_endpoint(:components), as: :mcp_components_manifest
+  get "/manifests/docs.json", to: Lookbook::McpServer.manifest_endpoint(:docs), as: :mcp_docs_manifest
+
   get "/*path", to: "application#not_found", via: :all
 end

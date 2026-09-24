@@ -1,0 +1,25 @@
+#!/usr/bin/env ruby
+
+# Serves the Lookbook MCP docs toolset over stdio from manifests exported
+# with `bin/rails lookbook:mcp:export`. Does not load Rails.
+#
+#   lookbook-mcp-docs path/to/lookbook-manifests
+
+$LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
+require "lookbook/version"
+require "lookbook/mcp/core"
+
+if ARGV.empty? || %w[-h --help].include?(ARGV.first)
+  warn "Usage: lookbook-mcp-docs MANIFEST_DIR"
+  warn "Serves Lookbook component docs over MCP (stdio) from exported components.json and docs.json."
+  exit(ARGV.empty? ? 1 : 0)
+end
+
+begin
+  Lookbook::McpStaticServer.new(ARGV.first).run_stdio
+rescue ArgumentError => e
+  warn e.message
+  exit 1
+rescue Interrupt
+  exit 0
+end
