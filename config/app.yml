@@ -75,6 +75,18 @@ shared:
     base_url: ~
     allowed_origins: []
     token: ~
+    apps: true
+    a11y:
+      browser_path: ~
+      axe_path: ~
+      timeout: 30
+      # Passed to axe.run. Page-structure rules are off by default because
+      # previews render components in isolation.
+      options:
+        rules:
+          region: {enabled: false}
+          landmark-one-main: {enabled: false}
+          page-has-heading-one: {enabled: false}
 
   links:
     docs: https://v2.lookbook.build

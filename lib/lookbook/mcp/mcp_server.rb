@@ -20,9 +20,12 @@ module Lookbook
     def self.protocol
       McpProtocol.new(
         tools: -> { McpTools.enabled },
-        resources: {
-          "lookbook://manifests/components.json" => ->(context) { McpManifest.new(base_url: context[:base_url]).components },
-          "lookbook://manifests/docs.json" => ->(context) { McpManifest.new(base_url: context[:base_url]).docs }
+        resources: -> {
+          [
+            McpResource.json("lookbook://manifests/components.json") { |context| McpManifest.new(base_url: context[:base_url]).components },
+            McpResource.json("lookbook://manifests/docs.json") { |context| McpManifest.new(base_url: context[:base_url]).docs },
+            (McpApps.previews_view if McpApps.enabled?)
+          ].compact
         },
         server_info: {
           name: "lookbook",

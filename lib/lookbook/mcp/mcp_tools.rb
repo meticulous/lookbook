@@ -65,7 +65,8 @@ module Lookbook
               },
               required: ["ids"]
             },
-            handler: ->(args, context) { new(context).previews_show(args["ids"], args["params"]) }
+            handler: ->(args, context) { new(context).previews_show(args["ids"], args["params"]) },
+            meta: McpApps.previews_tool_meta
           ),
           McpTool.new(
             name: "previews-find-by-component",
@@ -121,14 +122,20 @@ module Lookbook
           McpTool.new(
             name: "previews-check",
             toolset: :test,
-            description: "Renders preview scenarios and reports any that raise errors or render nothing. Checks every " \
-              "visible scenario unless ids or components are given. Run this after changing components, then fix and re-run.",
+            description: "Renders preview scenarios and reports any that raise errors or render nothing, and optionally " \
+              "any accessibility violations. Checks every visible scenario unless ids, components or changed are given. " \
+              "Run this after changing components, then fix and re-run.",
             input_schema: {
               type: "object",
               properties: {
                 ids: ARRAY_OF_STRINGS.merge(description: "Scenario or preview ids/lookup paths to check."),
                 components: ARRAY_OF_STRINGS.merge(description: "Check every scenario that renders these components (class names or file paths)."),
-                changed: {type: "boolean", description: "Check scenarios affected by uncommitted git changes (see previews-changed)."}
+                changed: {type: "boolean", description: "Check scenarios affected by uncommitted git changes (see previews-changed)."},
+                a11y: {
+                  type: "boolean",
+                  description: "Also run axe-core accessibility checks in headless Chrome and report violations. " \
+                    "Slower; requires the ferrum gem and axe-core."
+                }
               }
             },
             handler: ->(args, context) { new(context).previews_check(args) }
@@ -147,7 +154,7 @@ module Lookbook
     def preview_instructions
       path = Lookbook.config.mcp.instructions_path.presence
       path = Rails.root.join(path) if path && !Pathname(path).absolute?
-      File.read(path || DEFAULT_INSTRUCTIONS_PATH)
+      File.read(path || DEFAULT_INSTRUCTIONS_PATH, encoding: "UTF-8")
     end
 
     def previews_show(refs, params = nil)
@@ -157,20 +164,29 @@ module Lookbook
       query = params.to_h.to_query.presence
       out = []
       missing = []
+      previews = []
 
       refs.each do |ref|
         target = manifest.find_renderable(ref)
         next missing << ref unless target
 
-        out += ["", "## #{target_label(target)}", ""]
-        out << "- Inspect: #{with_query(manifest.url(target.inspect_path), query)}"
-        out << "- Preview: #{with_query(manifest.url(target.preview_path), query)}"
+        preview = {
+          title: target_label(target),
+          lookup_path: target.lookup_path,
+          inspect_url: with_query(manifest.url(target.inspect_path), query),
+          preview_url: with_query(manifest.url(target.preview_path), query)
+        }
+        previews << preview
+
+        out += ["", "## #{preview[:title]}", ""]
+        out << "- Inspect: #{preview[:inspect_url]}"
+        out << "- Preview: #{preview[:preview_url]}"
       end
 
       out += ["", "Not found: #{missing.map { |m| "`#{m}`" }.join(", ")}. Use docs-list or docs-show to find ids."] if missing.any?
       raise ToolError, out.join("\n").strip if missing.size == refs.size
 
-      out.join("\n").strip
+      McpTool::Result.new(text: out.join("\n").strip, structured_content: {previews: previews, missing: missing})
     end
 
     def previews_find_by_component(refs)
@@ -251,26 +267,51 @@ module Lookbook
       raise ToolError, "Nothing to check: #{missing.map { |m| "`#{m}`" }.join(", ")} not found." if scenarios.empty? && missing.any?
       return "No scenarios to check." if scenarios.empty?
 
+      a11y = a11y_checker if options["a11y"]
       failures = []
       warnings = []
+      violations = []
 
       scenarios.each do |scenario|
         result = renderer.call(scenario)
         if !result.success?
           failures << [scenario, "HTTP #{result.status}: #{result.error.to_s.strip.lines.first(CHECK_ERROR_LINES).join.strip}"]
-        elsif McpRenderer.body_content(result.html).blank?
-          warnings << [scenario, "rendered no output"]
+          next
         end
+
+        warnings << [scenario, "rendered no output"] if McpRenderer.body_content(result.html).blank?
+
+        if a11y
+          found = a11y.call(scenario)
+          violations << [scenario, found] if found.any?
+        end
+      rescue ToolError
+        raise
+      rescue => e
+        failures << [scenario, "Accessibility check failed: #{e.class}: #{e.message}"]
       end
 
-      passed = scenarios.size - failures.size
-      out = ["Checked #{scenarios.size} #{"scenario".pluralize(scenarios.size)}: #{passed} passed, #{failures.size} failed" \
-        "#{", #{warnings.size} with warnings" if warnings.any?}."]
+      passed = scenarios.size - failures.size - violations.size
+      summary = ["#{passed} passed", "#{failures.size} failed"]
+      summary << "#{violations.size} with accessibility violations" if a11y
+      summary << "#{warnings.size} with warnings" if warnings.any?
+      out = ["Checked #{scenarios.size} #{"scenario".pluralize(scenarios.size)}: #{summary.join(", ")}."]
 
       if failures.any?
         out += ["", "## Failures"]
         failures.each do |scenario, message|
           out += ["", "### #{target_label(scenario)} (id: `#{scenario.lookup_path}`)", "", "```", message, "```"]
+        end
+      end
+
+      if violations.any?
+        out += ["", "## Accessibility violations"]
+        violations.each do |scenario, found|
+          out += ["", "### #{target_label(scenario)} (id: `#{scenario.lookup_path}`)", ""]
+          found.each do |violation|
+            out << "- **#{violation.id}** (#{violation.impact || "unknown"} impact): #{violation.help} — #{violation.help_url}"
+            violation.nodes.each { |node| out << "  - `#{node[:target]}`: #{node[:summary].tr("\n", " ").squeeze(" ")}" }
+          end
         end
       end
 
@@ -281,12 +322,27 @@ module Lookbook
 
       out += ["", "Not found: #{missing.map { |m| "`#{m}`" }.join(", ")}"] if missing.any?
       out.join("\n")
+    ensure
+      a11y&.close
     end
 
     private
 
     def renderer
-      @renderer ||= McpRenderer.new(base_url: context[:request_base_url] || context[:base_url])
+      @renderer ||= McpRenderer.new(base_url: render_base_url)
+    end
+
+    def a11y_checker
+      unless McpA11yChecker.available?
+        raise ToolError, "Accessibility checks need the ferrum gem (and Chrome or Chromium). " \
+          "Add `gem \"ferrum\"` to your Gemfile's development group."
+      end
+
+      McpA11yChecker.new(base_url: render_base_url)
+    end
+
+    def render_base_url
+      context[:request_base_url] || context[:base_url]
     end
 
     # Returns `[{preview => [scenarios, reasons]}, uncovered_component_paths]`.

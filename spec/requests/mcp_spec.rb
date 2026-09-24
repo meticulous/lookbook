@@ -406,6 +406,72 @@ RSpec.describe "mcp", type: :request do
     end
   end
 
+  context "MCP Apps" do
+    it "links previews-show to the previews view" do
+      tool = rpc("tools/list")["result"]["tools"].find { |t| t["name"] == "previews-show" }
+
+      expect(tool.dig("_meta", "ui", "resourceUri")).to eq "ui://lookbook/previews"
+    end
+
+    it "omits the view when disabled" do
+      mcp_config.apps = false
+      tool = rpc("tools/list")["result"]["tools"].find { |t| t["name"] == "previews-show" }
+      uris = rpc("resources/list")["result"]["resources"].map { |r| r["uri"] }
+
+      expect(tool).not_to have_key("_meta")
+      expect(uris).not_to include("ui://lookbook/previews")
+    end
+
+    it "serves the view as an MCP App resource allowed to frame the app" do
+      listing = rpc("resources/list")["result"]["resources"].find { |r| r["uri"] == "ui://lookbook/previews" }
+      content = rpc("resources/read", {uri: "ui://lookbook/previews"})["result"]["contents"].first
+
+      expect(listing["mimeType"]).to eq "text/html;profile=mcp-app"
+      expect(content["mimeType"]).to eq "text/html;profile=mcp-app"
+      expect(content["text"]).to start_with "<!DOCTYPE html>"
+      expect(content.dig("_meta", "ui", "csp", "frameDomains")).to eq ["http://www.example.com"]
+    end
+
+    it "returns structured content for the view" do
+      result = call_tool("previews-show", {ids: ["standard/default", "nope"]})
+      previews = result.dig("structuredContent", "previews")
+
+      expect(previews.first).to include(
+        "title" => "Standard / Default",
+        "lookup_path" => "standard/default",
+        "preview_url" => "http://www.example.com/lookbook/preview/standard/default"
+      )
+      expect(result.dig("structuredContent", "missing")).to eq ["nope"]
+    end
+  end
+
+  context "previews-check accessibility" do
+    it "explains how to enable it when ferrum is missing" do
+      allow(Lookbook::McpA11yChecker).to receive(:available?).and_return(false)
+      result = call_tool("previews-check", {ids: ["standard/default"], a11y: true})
+
+      expect(result["isError"]).to be true
+      expect(result.dig("content", 0, "text")).to include("ferrum")
+    end
+
+    context "with a browser", :browser do
+      it "passes scenarios without violations" do
+        text = tool_text("previews-check", {ids: ["standard/default"], a11y: true})
+
+        expect(text).to start_with("Checked 1 scenario: 1 passed, 0 failed, 0 with accessibility violations.")
+      end
+
+      it "reports violations" do
+        allow_any_instance_of(StandardComponent).to receive(:render_in).and_return('<img src="/missing.png">'.html_safe)
+        text = tool_text("previews-check", {ids: ["standard/default"], a11y: true})
+
+        expect(text).to include("0 passed, 0 failed, 1 with accessibility violations")
+        expect(text).to include("**image-alt** (critical impact)")
+        expect(text).to include("`img`")
+      end
+    end
+  end
+
   context "resources" do
     it "reads the components manifest" do
       result = rpc("resources/read", {uri: "lookbook://manifests/components.json"})["result"]

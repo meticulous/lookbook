@@ -31,10 +31,10 @@ module Lookbook
     def protocol
       @protocol ||= McpProtocol.new(
         tools: -> { McpDocs.tools(->(_context) { manifests }) },
-        resources: {
-          "lookbook://manifests/components.json" => ->(_context) { read(components_path) },
-          "lookbook://manifests/docs.json" => ->(_context) { read(docs_path) }
-        },
+        resources: [
+          McpResource.json("lookbook://manifests/components.json") { read(components_path) },
+          McpResource.json("lookbook://manifests/docs.json") { read(docs_path) }
+        ],
         server_info: {name: "lookbook-docs", title: "#{@name} (Lookbook docs)", version: defined?(Lookbook::VERSION) ? Lookbook::VERSION : nil}.compact,
         instructions: INSTRUCTIONS
       )
@@ -65,7 +65,7 @@ module Lookbook
     end
 
     def read(path)
-      JSON.parse(File.read(path))
+      JSON.parse(File.read(path, encoding: "UTF-8"))
     end
 
     def components_path

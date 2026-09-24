@@ -17,4 +17,6 @@ group :test do
   gem "selenium-webdriver", "4.17.0"
   gem "puma", "~> 6"
   gem "rspec-rails", "~> 6"
+  gem "ferrum", require: false
+  gem "axe-core-api", require: false
 end

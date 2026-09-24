@@ -21,11 +21,11 @@ module Lookbook
     end
 
     # @param tools [#call] Returns the list of enabled McpTool objects
-    # @param resources [Hash{String => #call}] Resource URI => callable returning JSON-serializable data (given the context)
+    # @param resources [Array<McpResource>, #call] Resources, or a callable returning them
     # @param server_info [Hash] `name`, `title` and `version`
     # @param instructions [String] Server instructions for the agent
     # @param logger [Logger, nil]
-    def initialize(tools:, resources: {}, server_info: {}, instructions: nil, logger: nil)
+    def initialize(tools:, resources: [], server_info: {}, instructions: nil, logger: nil)
       @tools = tools
       @resources = resources
       @server_info = server_info
@@ -35,6 +35,10 @@ module Lookbook
 
     def tools
       @tools.call
+    end
+
+    def resources
+      @resources.respond_to?(:call) ? @resources.call : @resources
     end
 
     # Handles a raw JSON payload (a single message or a batch).
@@ -98,9 +102,9 @@ module Lookbook
       when "initialize" then initialize_result(params)
       when "ping" then {}
       when /\Anotifications\// then {}
-      when "tools/list" then {tools: tools.map(&:definition)}
+      when "tools/list" then {tools: tools.map { |tool| tool.definition(context) }}
       when "tools/call" then call_tool(params, context)
-      when "resources/list" then {resources: resource_list}
+      when "resources/list" then {resources: resources.map(&:listing)}
       when "resources/read" then read_resource(params, context)
       when "prompts/list" then {prompts: []}
       else raise RpcError.new(METHOD_NOT_FOUND, "Method not found: #{method}")
@@ -122,7 +126,8 @@ module Lookbook
       raise RpcError.new(INVALID_PARAMS, "Unknown tool: #{params["name"]}") unless tool
 
       arguments = params["arguments"].is_a?(Hash) ? params["arguments"] : {}
-      tool_result(tool.call(arguments, context))
+      result = tool.call(arguments, context)
+      tool_result(result.text, structured_content: result.structured_content)
     rescue McpToolError => e
       tool_result(e.message, error: true)
     rescue RpcError
@@ -132,22 +137,15 @@ module Lookbook
       tool_result("#{e.class}: #{e.message}", error: true)
     end
 
-    def tool_result(text, error: false)
-      {content: [{type: "text", text: text}], isError: error}
-    end
-
-    def resource_list
-      @resources.keys.map do |uri|
-        name = uri.split("/").last
-        {uri: uri, name: name, mimeType: "application/json"}
-      end
+    def tool_result(text, error: false, structured_content: nil)
+      {content: [{type: "text", text: text}], structuredContent: structured_content, isError: error}.compact
     end
 
     def read_resource(params, context)
-      loader = @resources[params["uri"]]
-      raise RpcError.new(INVALID_PARAMS, "Unknown resource: #{params["uri"]}") unless loader
+      resource = resources.find { |r| r.uri == params["uri"] }
+      raise RpcError.new(INVALID_PARAMS, "Unknown resource: #{params["uri"]}") unless resource
 
-      {contents: [{uri: params["uri"], mimeType: "application/json", text: JSON.generate(loader.call(context))}]}
+      {contents: [resource.read(context)]}
     end
 
     def error_response(id, code, message)

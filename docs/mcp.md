@@ -19,6 +19,7 @@ config.lookbook.mcp.instructions_path = "docs/lookbook_preview_instructions.md" 
 config.lookbook.mcp.base_url = "http://localhost:3000" # optional, defaults to the request's host
 config.lookbook.mcp.allowed_origins = []          # extra browser origins allowed to call the server
 config.lookbook.mcp.token = ENV["LOOKBOOK_MCP_TOKEN"] # optional bearer token
+config.lookbook.mcp.apps = true                  # MCP Apps inline preview view for previews-show
 ```
 
 With Lookbook mounted at `/lookbook`, the endpoint is `http://localhost:3000/lookbook/mcp`
@@ -60,6 +61,42 @@ require "lookbook/mcp/core"
 run Lookbook::McpStaticServer.new("lookbook-manifests", token: ENV["LOOKBOOK_MCP_TOKEN"])
 ```
 
+### Accessibility checks
+
+`previews-check` with `a11y: true` runs [axe-core](https://github.com/dequelabs/axe-core) against
+each scenario in headless Chrome. Add the optional dependencies to the app's Gemfile:
+
+```ruby
+group :development do
+  gem "ferrum"       # drives headless Chrome/Chromium
+  gem "axe-core-api" # provides axe.min.js (or install the `axe-core` npm package)
+end
+```
+
+The browser's requests to the app are answered in-process by the Rails app, so no running
+server is needed and results use the app's real stylesheets. Requests to other hosts are blocked.
+
+```ruby
+config.lookbook.mcp.a11y.browser_path = "/path/to/chrome" # or BROWSER_PATH; auto-detected otherwise
+config.lookbook.mcp.a11y.axe_path = "vendor/axe.min.js"    # optional, relative to the app root
+config.lookbook.mcp.a11y.timeout = 30                      # seconds
+config.lookbook.mcp.a11y.options = {                       # passed to axe.run
+  runOnly: {type: "tag", values: ["wcag2a", "wcag2aa"]}
+}
+```
+
+By default the page-structure rules `region`, `landmark-one-main` and `page-has-heading-one`
+are disabled, because previews render components in isolation. Setting `a11y.options` replaces
+those defaults.
+
+### Inline previews (MCP Apps)
+
+`previews-show` declares an [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) view
+(`ui://lookbook/previews`, SEP-1865). Hosts that support MCP Apps render the returned scenarios
+inline in iframes, with an "Open in Lookbook" button; other hosts use the text result. The view's
+CSP allows framing only the Lookbook origin (`base_url`). Hosts on HTTPS may refuse to frame an
+`http://localhost` app, in which case the links still work.
+
 ### Custom tools
 
 ```ruby
@@ -83,7 +120,7 @@ When working on UI components, use the `lookbook` MCP tools before writing any v
 - Query `docs-list` to find existing components.
 - Query `docs-show` for a component before using it. Only use constructor arguments and slots it documents.
 - Call `get-preview-instructions` before creating or updating previews.
-- After changing components, run `previews-check` with `changed: true`, fix any failures and re-run.
+- After changing components, run `previews-check` with `changed: true` (and `a11y: true`), fix any failures and re-run.
 - Share `previews-show` links so the user can review the result.
 ```
 
@@ -95,13 +132,14 @@ When working on UI components, use the `lookbook` MCP tools before writing any v
 | docs | `docs-show` | `docs-show` | Done |
 | docs | `docs-show-story` | `docs-show-story` | Done |
 | dev | `get-preview-instructions` | `get-storybook-story-instructions` | Done |
-| dev | `previews-show` | `stories-preview` | Done (links; MCP Apps inline view in phase 4) |
+| dev | `previews-show` | `stories-preview` | Done (links, plus MCP Apps inline view) |
 | dev | `previews-find-by-component` | `stories-find-by-component` | Done |
 | dev | `render-scenario` | none | Done |
 | dev | `previews-changed` | `stories-changed` | Done |
-| test | `previews-check` | `test-run` | Done (render errors and empty output; axe in phase 4) |
+| test | `previews-check` | `test-run` | Done (render errors, empty output, optional axe checks) |
 
-Resources: `lookbook://manifests/components.json`, `lookbook://manifests/docs.json`.
+Resources: `lookbook://manifests/components.json`, `lookbook://manifests/docs.json`, and the
+MCP Apps view `ui://lookbook/previews`.
 
 ## Manifests
 
@@ -113,13 +151,13 @@ Equivalent to Storybook's `/manifests/components.json` and `/manifests/docs.json
   source snippet, inspect and preview URLs).
 - `<mount>/manifests/docs.json`: Lookbook pages with their raw source.
 
-## Roadmap
+## Implementation phases
 
 1. **Done:** manifests, docs toolset, preview instructions, HTTP endpoint and info page, config, origin and token checks.
 2. **Done:** `previews-show`, `previews-find-by-component`, and `render-scenario` (rendered HTML with params).
 3. **Done:** `previews-check`, `previews-changed`, `lookbook:mcp:export` plus the Rails-free
    `lookbook-mcp-docs` / `McpStaticServer` docs server, `Lookbook.add_mcp_tool`, `lookbook:mcp:stdio`.
-4. axe accessibility checks via headless Chromium; inline previews via MCP Apps.
+4. **Done:** axe accessibility checks via Ferrum and headless Chrome; MCP Apps inline previews.
 
 ## Notes
 
@@ -138,5 +176,7 @@ Equivalent to Storybook's `/manifests/components.json` and `/manifests/docs.json
   to the app root. Changed files under component paths that no preview renders are listed separately.
 - The protocol, docs toolset and static server live in `lib/lookbook/mcp/core` and only need
   `json` and ActiveSupport, so they can run without Rails.
+- Accessibility checks run while the MCP request waits; the browser's requests are served on
+  Ferrum's thread, inside `permit_concurrent_loads` so code loading isn't blocked.
 - Component descriptions come from the comment block above the class definition and
   argument descriptions from `@param` lines above `def initialize`.

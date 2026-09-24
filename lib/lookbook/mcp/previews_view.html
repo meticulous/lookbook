@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lookbook previews</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --lb-bg: var(--color-background-primary, Canvas);
+      --lb-text: var(--color-text-primary, CanvasText);
+      --lb-muted: var(--color-text-secondary, GrayText);
+      --lb-border: var(--color-border-primary, rgba(127, 127, 127, 0.3));
+      --lb-font: var(--font-sans, system-ui, -apple-system, sans-serif);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--lb-bg); color: var(--lb-text); font-family: var(--lb-font); font-size: 14px; }
+    main { display: flex; flex-direction: column; gap: 16px; padding: 12px; }
+    .preview { border: 1px solid var(--lb-border); border-radius: 8px; overflow: hidden; }
+    .preview header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--lb-border); }
+    .preview h2 { margin: 0; font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .preview code { color: var(--lb-muted); font-size: 12px; }
+    .actions { display: flex; gap: 8px; flex-shrink: 0; }
+    button { font: inherit; font-size: 12px; padding: 4px 8px; border: 1px solid var(--lb-border); border-radius: 6px; background: transparent; color: inherit; cursor: pointer; }
+    button:hover { background: var(--lb-border); }
+    iframe { display: block; width: 100%; height: 320px; border: 0; background: #fff; resize: vertical; }
+    .empty, .missing { color: var(--lb-muted); margin: 0; }
+  </style>
+</head>
+<body>
+  <main id="app"><p class="empty">Waiting for previews…</p></main>
+  <script>
+    (function () {
+      "use strict";
+
+      var PROTOCOL_VERSION = "2026-01-26";
+      var nextId = 1;
+      var pending = {};
+      var app = document.getElementById("app");
+
+      function send(message) {
+        window.parent.postMessage(Object.assign({ jsonrpc: "2.0" }, message), "*");
+      }
+
+      function request(method, params) {
+        var id = nextId++;
+        send({ id: id, method: method, params: params || {} });
+        return new Promise(function (resolve, reject) {
+          pending[id] = { resolve: resolve, reject: reject };
+        });
+      }
+
+      function notify(method, params) {
+        send({ method: method, params: params || {} });
+      }
+
+      function isHttpUrl(value) {
+        try {
+          var url = new URL(value);
+          return url.protocol === "http:" || url.protocol === "https:";
+        } catch (e) {
+          return false;
+        }
+      }
+
+      function openLink(url) {
+        if (!isHttpUrl(url)) return;
+        request("ui/open-link", { url: url }).catch(function () {
+          window.open(url, "_blank", "noopener");
+        });
+      }
+
+      function el(tag, className, text) {
+        var node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text != null) node.textContent = text;
+        return node;
+      }
+
+      function button(label, url) {
+        var node = el("button", null, label);
+        node.type = "button";
+        node.addEventListener("click", function () { openLink(url); });
+        return node;
+      }
+
+      function render(data) {
+        var previews = (data && Array.isArray(data.previews)) ? data.previews : [];
+        var missing = (data && Array.isArray(data.missing)) ? data.missing : [];
+        app.textContent = "";
+
+        if (previews.length === 0) {
+          app.appendChild(el("p", "empty", "No previews to show."));
+        }
+
+        previews.forEach(function (preview) {
+          if (!isHttpUrl(preview.preview_url)) return;
+
+          var section = el("section", "preview");
+          var header = el("header");
+          var titles = el("div");
+          titles.appendChild(el("h2", null, preview.title || preview.lookup_path));
+          titles.appendChild(el("code", null, preview.lookup_path || ""));
+          header.appendChild(titles);
+
+          var actions = el("div", "actions");
+          if (isHttpUrl(preview.inspect_url)) actions.appendChild(button("Open in Lookbook", preview.inspect_url));
+          header.appendChild(actions);
+
+          var frame = document.createElement("iframe");
+          frame.src = preview.preview_url;
+          frame.title = preview.title || "Preview";
+          frame.loading = "lazy";
+
+          section.appendChild(header);
+          section.appendChild(frame);
+          app.appendChild(section);
+        });
+
+        if (missing.length > 0) {
+          app.appendChild(el("p", "missing", "Not found: " + missing.join(", ")));
+        }
+      }
+
+      function applyHostContext(context) {
+        var variables = context && context.styles && context.styles.variables;
+        if (variables) {
+          Object.keys(variables).forEach(function (name) {
+            if (name.indexOf("--") === 0) document.documentElement.style.setProperty(name, variables[name]);
+          });
+        }
+        if (context && (context.theme === "light" || context.theme === "dark")) {
+          document.documentElement.style.colorScheme = context.theme;
+        }
+      }
+
+      window.addEventListener("message", function (event) {
+        var message = event.data;
+        if (!message || message.jsonrpc !== "2.0") return;
+
+        // Response to one of our requests
+        if (message.id != null && !message.method && pending[message.id]) {
+          var handler = pending[message.id];
+          delete pending[message.id];
+          if (message.error) handler.reject(message.error);
+          else handler.resolve(message.result);
+          return;
+        }
+
+        switch (message.method) {
+          case "ui/notifications/tool-result":
+            render(message.params && message.params.structuredContent);
+            break;
+          case "ui/notifications/host-context-changed":
+            applyHostContext(message.params);
+            break;
+          case "ui/resource-teardown":
+          case "ping":
+            if (message.id != null) send({ id: message.id, result: {} });
+            break;
+        }
+      });
+
+      request("ui/initialize", {
+        appInfo: { name: "lookbook-previews", version: "1.0.0" },
+        appCapabilities: {},
+        protocolVersion: PROTOCOL_VERSION
+      }).then(function (result) {
+        applyHostContext(result && result.hostContext);
+        notify("ui/notifications/initialized");
+      }).catch(function () {
+        notify("ui/notifications/initialized");
+      });
+
+      if (window.ResizeObserver) {
+        var lastWidth = 0;
+        var lastHeight = 0;
+        new ResizeObserver(function () {
+          var width = Math.ceil(document.documentElement.scrollWidth);
+          var height = Math.ceil(document.documentElement.scrollHeight);
+          if (width === lastWidth && height === lastHeight) return;
+          lastWidth = width;
+          lastHeight = height;
+          notify("ui/notifications/size-changed", { width: width, height: height });
+        }).observe(document.documentElement);
+      }
+    })();
+  </script>
+</body>
+</html>

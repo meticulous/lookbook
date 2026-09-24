@@ -97,6 +97,101 @@ RSpec.describe "Lookbook MCP" do
     end
   end
 
+  describe "MCP Apps previews view", :browser do
+    # A minimal MCP Apps host: frames the view, answers ui/initialize,
+    # waits for ui/notifications/initialized, then sends the tool result.
+    let(:host_page) do
+      <<~HTML
+        <!DOCTYPE html>
+        <html><body>
+          <iframe id="view"></iframe>
+          <script>
+            window.__log = [];
+            const frame = document.getElementById("view");
+            const toolResult = #{JSON.generate(tool_result)};
+            window.addEventListener("message", (event) => {
+              const message = event.data;
+              window.__log.push(message.method || ("response:" + message.id));
+              if (message.method === "ui/initialize") {
+                window.__initParams = message.params;
+                frame.contentWindow.postMessage({jsonrpc: "2.0", id: message.id, result: {
+                  protocolVersion: "2026-01-26", hostInfo: {name: "test-host", version: "1"},
+                  hostCapabilities: {}, hostContext: {theme: "dark", styles: {variables: {"--color-text-primary": "rgb(1, 2, 3)"}}}
+                }}, "*");
+              }
+              if (message.method === "ui/notifications/initialized") {
+                frame.contentWindow.postMessage({jsonrpc: "2.0", method: "ui/notifications/tool-input", params: {arguments: {}}}, "*");
+                frame.contentWindow.postMessage({jsonrpc: "2.0", method: "ui/notifications/tool-result", params: toolResult}, "*");
+              }
+              if (message.method === "ui/open-link") {
+                window.__openedLink = message.params.url;
+                frame.contentWindow.postMessage({jsonrpc: "2.0", id: message.id, result: {}}, "*");
+              }
+            });
+            frame.srcdoc = #{JSON.generate(File.read(Lookbook::McpApps::PREVIEWS_VIEW_PATH, encoding: "UTF-8")).gsub("</", "<\\/")};
+          </script>
+        </body></html>
+      HTML
+    end
+
+    let(:tool_result) do
+      {
+        content: [{type: "text", text: "..."}],
+        structuredContent: {
+          previews: [
+            {title: "Button / Default", lookup_path: "button/default", preview_url: "http://localhost:3000/lookbook/preview/button/default", inspect_url: "http://localhost:3000/lookbook/inspect/button/default"},
+            {title: "Bad <script>", lookup_path: "bad", preview_url: "javascript:alert(1)", inspect_url: "javascript:alert(1)"}
+          ],
+          missing: ["nope"]
+        }
+      }
+    end
+
+    it "completes the handshake and renders the previews" do
+      require "ferrum"
+      browser = Ferrum::Browser.new(headless: true, timeout: 15, browser_path: ENV["BROWSER_PATH"].presence,
+        browser_options: Process.uid.zero? ? {"no-sandbox" => nil} : {})
+      page = browser.create_page
+      page.network.intercept
+      page.on(:request) { |request| request.abort }
+      page.content = host_page
+
+      rendered = nil
+      50.times do
+        rendered = page.evaluate(<<~JS)
+          (() => {
+            const doc = document.getElementById("view").contentDocument;
+            const frames = doc ? Array.from(doc.querySelectorAll("iframe")) : [];
+            if (frames.length === 0) return null;
+            doc.querySelector("button").click();
+            return {
+              titles: Array.from(doc.querySelectorAll("h2")).map((h) => h.textContent),
+              frames: frames.map((f) => f.getAttribute("src")),
+              missing: doc.querySelector(".missing") && doc.querySelector(".missing").textContent,
+              textColor: getComputedStyle(doc.body).color
+            };
+          })()
+        JS
+        break if rendered
+        sleep 0.1
+      end
+      sleep 0.2
+
+      expect(page.evaluate("window.__initParams")).to include(
+        "protocolVersion" => "2026-01-26",
+        "appInfo" => {"name" => "lookbook-previews", "version" => "1.0.0"}
+      )
+      expect(page.evaluate("window.__log")).to include("ui/initialize", "ui/notifications/initialized", "ui/notifications/size-changed")
+      expect(rendered["titles"]).to eq ["Button / Default"]
+      expect(rendered["frames"]).to eq ["http://localhost:3000/lookbook/preview/button/default"]
+      expect(rendered["missing"]).to eq "Not found: nope"
+      expect(rendered["textColor"]).to eq "rgb(1, 2, 3)"
+      expect(page.evaluate("window.__openedLink")).to eq "http://localhost:3000/lookbook/inspect/button/default"
+    ensure
+      browser&.quit
+    end
+  end
+
   describe "lookbook-mcp-docs executable" do
     before { Lookbook::McpManifest.export(export_dir) }
 
